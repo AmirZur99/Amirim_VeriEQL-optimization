@@ -846,6 +846,7 @@ class Environment:
             pass
         return False
 
+#Amir: i udpated this method to return also the theoretical bound for the loop
     def analyze(self, *queries, out_file: str = None):
         if self.sql_code is not None:
             queries = list(map(str.upper, queries))
@@ -878,7 +879,6 @@ class Environment:
                             raise Exception
                     elif isinstance(last_2nd_table, FOrderByTable):
                         if scope.orderby_constraints['tuples'] == [t.SORT for t in last_2nd_table]:
-                            # scope.orderby_constraints['tuples']
                             self.orderby_constraints.append(scope.orderby_constraints)
                         else:
                             raise Exception
@@ -909,8 +909,8 @@ class Environment:
         if result == True:
             self.sql_code = None
         elif result == False and self.sql_code is not None:
-            tables = '\n'.join(table for table in self.sql_code['tables'].values())
-            self.sql_code = f"{tables}\n{self.sql_code['sql1']}\n{self.sql_code['sql2']}"
+            tables_display = '\n'.join(table for table in self.sql_code['tables'].values())
+            self.sql_code = f"{tables_display}\n{self.sql_code['sql1']}\n{self.sql_code['sql2']}"
 
         return result
 

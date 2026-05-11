@@ -327,6 +327,34 @@ class SQLParser:
     def __repr__(self):
         return self.__str__()
 
+#Amir: This is my additional method TODO: write documentation
+    def get_metadata_from_ast(self, parsed):
+        # 1. זיהוי DISTINCT
+        is_distinct = False
+        select_clause = parsed.get('select', {})
+        if isinstance(select_clause, dict) and 'distinct' in select_clause:
+            is_distinct = True
+        elif isinstance(select_clause, list):
+            for item in select_clause:
+                if isinstance(item, dict) and 'distinct' in item:
+                    is_distinct = True
+
+        # 2. ספירת אטומים (טבלאות) ב-FROM
+        from_clause = parsed.get('from', [])
+        if isinstance(from_clause, str):
+            atoms = 1
+        elif isinstance(from_clause, list):
+            atoms = len(from_clause)
+        else:
+            atoms = 1
+
+        # 3. בדיקה אם השאילתה היא Conjunctive Query (CQ)
+        # CQ לא מכילה GROUP BY, UNION, LIMIT או HAVING
+        forbidden_keys = ['groupby', 'having', 'union', 'limit']
+        is_cq = not any(key in parsed for key in forbidden_keys)
+
+        return {"is_distinct": is_distinct, "atoms": atoms, "is_cq": is_cq}
+
 
 if __name__ == '__main__':
     parser = SQLParser()

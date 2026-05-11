@@ -20,6 +20,7 @@ from logger import LOGGER
 from utils import (
     divide,
 )
+from parsers import SQLParser
 
 parser = argparse.ArgumentParser(description='VeriEQL cli')
 parser.add_argument('-f', '--file', type=str)
@@ -84,6 +85,32 @@ def process_ends_with_max_timeout(
         index, schema, constraint, query1, query2, max_bound_size, states, time_cost,
         timeout, queue: Queue
 ):
+    # --- חישוב החסם התיאורטי פעם אחת מראש בתהליך הראשי ---
+    parser = SQLParser()
+    try:
+        # תיקון הקריסה: הקריאה הנכונה היא parse
+        ast1 = parser.parse(query1)
+        ast2 = parser.parse(query2)
+        meta1 = parser.get_metadata_from_ast(ast1)
+        meta2 = parser.get_metadata_from_ast(ast2)
+
+        t_bound = max(meta1['atoms'], meta2['atoms'])
+
+        # וידוא כפול: נוודא ש-DISTINCT קיים ממש בטקסט
+        is_distinct1 = 'DISTINCT' in query1.upper()
+        is_distinct2 = 'DISTINCT' in query2.upper()
+
+        is_cq_dist = (meta1['is_cq'] and meta2['is_cq'] and is_distinct1 and is_distinct2)
+
+        # הדפסת בקרה - נראה את זה בטרמינל מיד כשהשאילתה מתחילה!
+        print(f"\n[Analyzer] Index {index} -> t_bound: {t_bound}, is_cq_dist: {is_cq_dist}")
+
+    except Exception as e:
+        print(f"\n[Error] Failed analyzing query index {index}: {e}")
+        t_bound = max_bound_size
+        is_cq_dist = False
+    # --------------------------------------------------
+
     result = {
         'index': index,
         'pair': [query1, query2],
@@ -125,7 +152,14 @@ def process_ends_with_max_timeout(
                 result['times'].append(None)
 
             if state == STATE.EQUIV:
-                # only continute if queries are = or !=
+                # --- עצירה מוקדמת על בסיס החישוב החד פעמי ---
+                if is_cq_dist and bound_size >= t_bound:
+                    print(
+                        f"\n[Success] Verified Equivalent: Theoretical bound {t_bound} reached for index {index}. Stopping early!")
+                    break
+                # ---------------------------------------------
+
+                # only continue if queries are = or !=
                 bound_size = len(result['states']) + 1
                 pbar.set_description(f'Bound size: {bound_size:5d} | Thread: {1:3d}', refresh=False)
                 pbar.update(bound_size)
@@ -142,7 +176,6 @@ def process_ends_with_max_timeout(
             time.sleep(0.1)  # Just to avoid hogging the CPU
     else:
         # We only enter this if we didn't 'break' above.
-        LOGGER.debug("timed out, killing all processes")
         proc.terminate()
         proc.join()
         result['states'].append(STATE.TIMEOUT)
