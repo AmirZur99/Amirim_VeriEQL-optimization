@@ -1,0 +1,5 @@
+הפקודה שצריך
+docker run -it --rm -v ${PWD}:/VeriEQL -w /VeriEQL verieql conda run --no-capture-output -n VeriEQL python ...
+
+פקודה חלופית:
+docker run -it --name verieql-run --rm -v "C:\Users\Amirz\Desktop\study\AMIRIM\VeriEQL:/app" -w /app verieql:latest /bin/bash
