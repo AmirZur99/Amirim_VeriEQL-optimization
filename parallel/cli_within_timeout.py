@@ -101,14 +101,16 @@ def process_ends_with_max_timeout(
         is_distinct2 = 'DISTINCT' in query2.upper()
 
         is_cq_dist = (meta1['is_cq'] and meta2['is_cq'] and is_distinct1 and is_distinct2)
+        # CM bound applies to all CQ pairs: exact for CQ+DISTINCT, upper bound for plain CQ
+        is_cq = (meta1['is_cq'] and meta2['is_cq'])
 
-        # הדפסת בקרה - נראה את זה בטרמינל מיד כשהשאילתה מתחילה!
-        print(f"\n[Analyzer] Index {index} -> t_bound: {t_bound}, is_cq_dist: {is_cq_dist}")
+        print(f"\n[Analyzer] Index {index} -> t_bound: {t_bound}, is_cq: {is_cq}, is_cq_dist: {is_cq_dist}")
 
     except Exception as e:
         print(f"\n[Error] Failed analyzing query index {index}: {e}")
         t_bound = max_bound_size
         is_cq_dist = False
+        is_cq = False
     # --------------------------------------------------
 
     result = {
@@ -153,9 +155,11 @@ def process_ends_with_max_timeout(
 
             if state == STATE.EQUIV:
                 # --- עצירה מוקדמת על בסיס החישוב החד פעמי ---
-                if is_cq_dist and bound_size >= t_bound:
+                # For CQ+DISTINCT the CM bound is exact; for plain CQ it is an upper bound — both justify early stop
+                if is_cq and bound_size >= t_bound:
+                    bound_type = "exact" if is_cq_dist else "upper"
                     print(
-                        f"\n[Success] Verified Equivalent: Theoretical bound {t_bound} reached for index {index}. Stopping early!")
+                        f"\n[Success] Verified Equivalent: CM {bound_type} bound {t_bound} reached for index {index}. Stopping early!")
                     break
                 # ---------------------------------------------
 
