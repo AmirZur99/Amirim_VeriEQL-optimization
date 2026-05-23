@@ -327,9 +327,49 @@ class SQLParser:
     def __repr__(self):
         return self.__str__()
 
+    def _count_atoms_from(self, from_clause):
+        """Recursively count base-table atoms in a FROM clause, expanding
+        subqueries.  Also reports whether any immediate FROM subquery uses
+        DISTINCT (needed for the professor's DISTINCT-condition check).
+        Returns (atoms: int, from_subquery_has_distinct: bool).
+        """
+        if from_clause is None:
+            return 0, False
+        if isinstance(from_clause, str):
+            # bare table name
+            return 1, False
+        if isinstance(from_clause, dict):
+            if 'value' in from_clause:
+                inner = from_clause['value']
+                if isinstance(inner, dict) and 'select' in inner:
+                    # subquery alias: {'value': {SELECT ...}, 'name': alias}
+                    meta = self.get_metadata_from_ast(inner)
+                    return meta['atoms'], meta['is_distinct']
+                # aliased base table: {'value': 'T1', 'name': alias}
+                return 1, False
+            # join operator dict: {'inner join': 'T2', 'on': ...}
+            for join_key in ('join', 'inner join', 'left join', 'left outer join',
+                             'right join', 'right outer join', 'full join',
+                             'full outer join', 'cross join'):
+                if join_key in from_clause:
+                    rhs = from_clause[join_key]
+                    if isinstance(rhs, dict) and 'select' in rhs:
+                        meta = self.get_metadata_from_ast(rhs)
+                        return meta['atoms'], meta['is_distinct']
+                    return 1, False
+            return 1, False
+        if isinstance(from_clause, list):
+            total_atoms, any_sq_distinct = 0, False
+            for item in from_clause:
+                a, d = self._count_atoms_from(item)
+                total_atoms += a
+                any_sq_distinct = any_sq_distinct or d
+            return total_atoms, any_sq_distinct
+        return 1, False
+
 #Amir: This is my additional method TODO: write documentation
     def get_metadata_from_ast(self, parsed):
-        # 1. זיהוי DISTINCT
+        # 1. Detect DISTINCT in outermost SELECT
         is_distinct = False
         select_clause = parsed.get('select', {})
         if isinstance(select_clause, dict) and 'distinct' in select_clause:
@@ -339,21 +379,27 @@ class SQLParser:
                 if isinstance(item, dict) and 'distinct' in item:
                     is_distinct = True
 
-        # 2. ספירת אטומים (טבלאות) ב-FROM
+        # 2. Count atoms recursively through FROM subqueries;
+        #    also detect DISTINCT in any immediate FROM subquery
         from_clause = parsed.get('from', [])
-        if isinstance(from_clause, str):
-            atoms = 1
-        elif isinstance(from_clause, list):
-            atoms = len(from_clause)
-        else:
-            atoms = 1
+        atoms, from_subquery_has_distinct = self._count_atoms_from(from_clause)
 
-        # 3. בדיקה אם השאילתה היא Conjunctive Query (CQ)
-        # CQ לא מכילה GROUP BY, UNION, LIMIT או HAVING
+        # 3. Check if outermost query is CQ (no GROUP BY, HAVING, UNION, LIMIT)
         forbidden_keys = ['groupby', 'having', 'union', 'limit']
         is_cq = not any(key in parsed for key in forbidden_keys)
 
-        return {"is_distinct": is_distinct, "atoms": atoms, "is_cq": is_cq}
+        # 4. CM bound is valid when:
+        #    - outer query uses DISTINCT, OR
+        #    - neither outer nor any FROM subquery uses DISTINCT
+        #    It does NOT hold when outer lacks DISTINCT but a FROM subquery has it.
+        bound_applicable = is_distinct or (not from_subquery_has_distinct)
+
+        return {
+            "is_distinct": is_distinct,
+            "atoms": atoms,
+            "is_cq": is_cq,
+            "bound_applicable": bound_applicable,
+        }
 
 
 if __name__ == '__main__':

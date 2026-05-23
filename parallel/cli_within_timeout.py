@@ -103,14 +103,18 @@ def process_ends_with_max_timeout(
         is_cq_dist = (meta1['is_cq'] and meta2['is_cq'] and is_distinct1 and is_distinct2)
         # CM bound applies to all CQ pairs: exact for CQ+DISTINCT, upper bound for plain CQ
         is_cq = (meta1['is_cq'] and meta2['is_cq'])
+        # For queries with FROM subqueries, bound only holds when:
+        #   outer has DISTINCT, OR neither outer nor FROM subquery has DISTINCT
+        bound_applicable = meta1['bound_applicable'] and meta2['bound_applicable']
 
-        print(f"\n[Analyzer] Index {index} -> t_bound: {t_bound}, is_cq: {is_cq}, is_cq_dist: {is_cq_dist}")
+        print(f"\n[Analyzer] Index {index} -> t_bound: {t_bound}, is_cq: {is_cq}, is_cq_dist: {is_cq_dist}, bound_applicable: {bound_applicable}")
 
     except Exception as e:
         print(f"\n[Error] Failed analyzing query index {index}: {e}")
         t_bound = max_bound_size
         is_cq_dist = False
         is_cq = False
+        bound_applicable = False
     # --------------------------------------------------
 
     result = {
@@ -155,8 +159,9 @@ def process_ends_with_max_timeout(
 
             if state == STATE.EQUIV:
                 # --- עצירה מוקדמת על בסיס החישוב החד פעמי ---
-                # For CQ+DISTINCT the CM bound is exact; for plain CQ it is an upper bound — both justify early stop
-                if is_cq and bound_size >= t_bound:
+                # For CQ+DISTINCT the CM bound is exact; for plain CQ it is an upper bound — both justify early stop.
+                # bound_applicable gates FROM-subquery cases where the bound would not hold.
+                if is_cq and bound_applicable and bound_size >= t_bound:
                     bound_type = "exact" if is_cq_dist else "upper"
                     print(
                         f"\n[Success] Verified Equivalent: CM {bound_type} bound {t_bound} reached for index {index}. Stopping early!")
