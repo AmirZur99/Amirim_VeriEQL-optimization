@@ -369,24 +369,36 @@ class SQLParser:
 
 #Amir: This is my additional method TODO: write documentation
     def get_metadata_from_ast(self, parsed):
-        # 1. Detect DISTINCT in outermost SELECT
-        is_distinct = False
-        select_clause = parsed.get('select', {})
-        if isinstance(select_clause, dict) and 'distinct' in select_clause:
-            is_distinct = True
-        elif isinstance(select_clause, list):
-            for item in select_clause:
-                if isinstance(item, dict) and 'distinct' in item:
-                    is_distinct = True
+        # 1. Detect DISTINCT in outermost SELECT.
+        #    mo_sql_parsing represents SELECT DISTINCT as 'select_distinct' key.
+        is_distinct = 'select_distinct' in parsed
+        if not is_distinct:
+            select_clause = parsed.get('select', {})
+            if isinstance(select_clause, dict) and 'distinct' in select_clause:
+                is_distinct = True
+            elif isinstance(select_clause, list):
+                for item in select_clause:
+                    if isinstance(item, dict) and 'distinct' in item:
+                        is_distinct = True
 
         # 2. Count atoms recursively through FROM subqueries;
         #    also detect DISTINCT in any immediate FROM subquery
         from_clause = parsed.get('from', [])
         atoms, from_subquery_has_distinct = self._count_atoms_from(from_clause)
 
-        # 3. Check if outermost query is CQ (no GROUP BY, HAVING, UNION, LIMIT)
+        # 3. Check if outermost query is CQ (no GROUP BY, HAVING, UNION, LIMIT).
+        #    Also check CTE bodies in the WITH clause — if any CTE is non-CQ the
+        #    whole query is non-CQ (e.g. WITH S AS (SELECT ... GROUP BY ...) ...).
         forbidden_keys = ['groupby', 'having', 'union', 'limit']
         is_cq = not any(key in parsed for key in forbidden_keys)
+        if is_cq and 'with' in parsed:
+            with_clause = parsed['with']
+            ctes = with_clause if isinstance(with_clause, list) else [with_clause]
+            for cte in ctes:
+                if isinstance(cte, dict) and isinstance(cte.get('value'), dict):
+                    if not self.get_metadata_from_ast(cte['value'])['is_cq']:
+                        is_cq = False
+                        break
 
         # 4. CM bound is valid when:
         #    - outer query uses DISTINCT, OR

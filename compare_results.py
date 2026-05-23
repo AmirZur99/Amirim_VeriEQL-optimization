@@ -27,16 +27,17 @@ def load_results(path):
 def final_verdict(states):
     """
     Derive the definitive answer from a states list.
-    - Any NEQ in the list → NEQ  (counterexample found)
-    - All EQU (possibly terminated by TMO/OOM) → last non-timeout state
-    - Only timeouts/OOM → TIMEOUT
+    - Last state is NEQ → NEQ  (counterexample found, always terminates)
+    - Last state is EQU → EQU  (stopped by CM bound or all bounds exhausted)
+    - Last state is TMO/OOM → TIMEOUT  (did not reach a conclusion)
+    - Anything else → that state (SYN, NSE, etc.)
     """
-    if "NEQ" in states:
-        return "NEQ"
-    resolved = [s for s in states if s not in ("TMO", "OOM", None)]
-    if resolved:
-        return resolved[-1]   # last EQU (or NSE/NIE/etc.)
-    return "TIMEOUT"
+    if not states:
+        return "TIMEOUT"
+    last = states[-1]
+    if last in ("TMO", "OOM", None):
+        return "TIMEOUT"
+    return last
 
 
 def main(reference_path, new_path):
@@ -113,9 +114,10 @@ def main(reference_path, new_path):
         n = final_verdict(new[idx]["states"])
         states_map.setdefault((r, n), []).append(idx)
 
+    header = 'ref \\ new'
     print(f"\n{SEP}")
     print("  Verdict transition matrix  (ref → new)")
-    print(f"  {'ref \\ new':<12}  EQU   NEQ   TIMEOUT  OTHER")
+    print(f"  {header:<12}  EQU   NEQ   TIMEOUT  OTHER")
     for r_v in ("EQU", "NEQ", "TIMEOUT"):
         row = []
         for n_v in ("EQU", "NEQ", "TIMEOUT", "OTHER"):
