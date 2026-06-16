@@ -91,14 +91,19 @@ def process_ends_with_max_timeout(
         # תיקון הקריסה: הקריאה הנכונה היא parse
         ast1 = parser.parse(query1)
         ast2 = parser.parse(query2)
-        meta1 = parser.get_metadata_from_ast(ast1)
-        meta2 = parser.get_metadata_from_ast(ast2)
+        meta1 = parser.get_metadata_from_ast(ast1, schema, constraint)
+        meta2 = parser.get_metadata_from_ast(ast2, schema, constraint)
 
         t_bound = max(meta1['atoms'], meta2['atoms'])
 
-        # וידוא כפול: נוודא ש-DISTINCT קיים ממש בטקסט
-        is_distinct1 = 'DISTINCT' in query1.upper()
-        is_distinct2 = 'DISTINCT' in query2.upper()
+        # Strict, schema-aware SET/BAG classification: only the outermost
+        # SELECT's DISTINCT counts (DISTINCT in inner subqueries/CTEs is
+        # ignored), plus "SET in disguise" detection via PRIMARY/UNIQUE
+        # column projection against `schema`/`constraint`. Stored on the
+        # parser instance as q1_type/q2_type.
+        parser.classify_queries(ast1, ast2, schema, constraint)
+        is_distinct1 = parser.q1_type == QUERY_TYPE.SET
+        is_distinct2 = parser.q2_type == QUERY_TYPE.SET
 
         is_cq_dist = (meta1['is_cq'] and meta2['is_cq'] and is_distinct1 and is_distinct2)
         # CM bound applies to all CQ pairs: exact for CQ+DISTINCT, upper bound for plain CQ
@@ -107,7 +112,26 @@ def process_ends_with_max_timeout(
         #   outer has DISTINCT, OR neither outer nor FROM subquery has DISTINCT
         bound_applicable = meta1['bound_applicable'] and meta2['bound_applicable']
 
-        print(f"\n[Analyzer] Index {index} -> t_bound: {t_bound}, is_cq: {is_cq}, is_cq_dist: {is_cq_dist}, bound_applicable: {bound_applicable}")
+        # --- SET/BAG mismatch handler ---
+        # Applies strictly and exclusively to pairs that are already valid CQs
+        # eligible for the standard CM bound (is_cq and bound_applicable).
+        # Non-CQ queries are untouched.
+        #
+        # If Q1 and Q2 are both valid CQs but disagree on outermost SET/BAG
+        # semantics (one has DISTINCT, the other doesn't), the plain CM bound
+        # is not guaranteed to be enough: proving NEQ under BAG semantics may
+        # require a *duplicate* row that a DISTINCT (SET) query would collapse
+        # away, and the standard bound only accounts for distinct atoms. Rather
+        # than disabling the early-stop optimization for this case, we widen
+        # the bound by 1 (Bound = CM + 1) — the extra slot gives the Z3 solver
+        # the search space needed to construct that duplicate row and find a
+        # counterexample, while still bounding the search.
+        is_semantics_mismatch = is_cq and bound_applicable and (is_distinct1 != is_distinct2)
+        if is_semantics_mismatch:
+            t_bound = t_bound + 1
+
+        print(f"\n[Analyzer] Index {index} -> t_bound: {t_bound}, is_cq: {is_cq}, is_cq_dist: {is_cq_dist}, "
+              f"bound_applicable: {bound_applicable}, semantics_mismatch: {is_semantics_mismatch}")
 
     except Exception as e:
         print(f"\n[Error] Failed analyzing query index {index}: {e}")
@@ -115,6 +139,7 @@ def process_ends_with_max_timeout(
         is_cq_dist = False
         is_cq = False
         bound_applicable = False
+        is_semantics_mismatch = False
     # --------------------------------------------------
 
     result = {
@@ -163,8 +188,9 @@ def process_ends_with_max_timeout(
                 # bound_applicable gates FROM-subquery cases where the bound would not hold.
                 if is_cq and bound_applicable and bound_size >= t_bound:
                     bound_type = "exact" if is_cq_dist else "upper"
+                    mismatch_note = " (CM+1, SET/BAG mismatch)" if is_semantics_mismatch else ""
                     print(
-                        f"\n[Success] Verified Equivalent: CM {bound_type} bound {t_bound} reached for index {index}. Stopping early!")
+                        f"\n[Success] Verified Equivalent: CM {bound_type} bound {t_bound}{mismatch_note} reached for index {index}. Stopping early!")
                     break
                 # ---------------------------------------------
 
