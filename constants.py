@@ -75,11 +75,6 @@ class DIALECT:
     ORACLE = "oracle"
 
 
-class QUERY_TYPE:
-    SET = "SET"
-    BAG = "BAG"
-
-
 class STATE:
     EQUIV = "EQU"
     NON_EQUIV = "NEQ"

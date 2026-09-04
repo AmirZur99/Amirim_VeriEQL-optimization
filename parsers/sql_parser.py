@@ -15,7 +15,6 @@ from constants import (
     IS_FALSE,
     SPACE_STRING,
     DIALECT,
-    QUERY_TYPE,
 )
 from errors import (
     ParserSyntaxError,
@@ -81,9 +80,7 @@ class SQLParser:
     def __init__(self):
         " a + b -c"
         "GroupByTable: 10k"
-        # strict SET/BAG classification of the last-classified Q1/Q2 pair
-        self.q1_type = None
-        self.q2_type = None
+        pass
 
     def parse(self, query: str, dialect=DIALECT.ALL):
         # preprocessing
@@ -370,157 +367,19 @@ class SQLParser:
             return total_atoms, any_sq_distinct
         return 1, False
 
-    @staticmethod
-    def _get_single_base_table(from_clause):
-        """Return (table_name, alias) if `from_clause` refers to exactly one
-        base table (no joins, no FROM-subquery). Otherwise return None.
-
-        Schema-aware uniqueness reclassification is only sound when there is
-        a single source table: with joins (even simple inner joins), fan-out
-        can multiply rows and break a single table's PK/UNIQUE uniqueness
-        guarantee for the *result* of the query.
-        """
-        if isinstance(from_clause, str):
-            return from_clause, from_clause
-        if isinstance(from_clause, dict):
-            value = from_clause.get('value')
-            if isinstance(value, str):
-                return value, from_clause.get('name', value)
-        return None
-
-    @staticmethod
-    def _flatten_constraint_values(operands) -> set:
-        """Recursively collect every 'TABLE__COLUMN' string referenced inside
-        a constraint's operand structure (handles single-column and
-        composite-key shapes alike)."""
-        values = set()
-        if isinstance(operands, dict):
-            if isinstance(operands.get('value'), str):
-                values.add(operands['value'])
-            else:
-                for v in operands.values():
-                    values |= SQLParser._flatten_constraint_values(v)
-        elif isinstance(operands, list):
-            for o in operands:
-                values |= SQLParser._flatten_constraint_values(o)
-        return values
-
-    @staticmethod
-    def _resolve_projected_columns(select_clause, table_name, alias, schema):
-        """Resolve the outermost SELECT's projection into a set of fully
-        qualified 'TABLE__COLUMN' names for the single base table in FROM.
-
-        Returns None when any projected item is not a plain column
-        reference or a schema-expandable wildcard (e.g. an arithmetic
-        expression, aggregate, or function call) — uniqueness cannot be
-        determined safely in that case, and the caller must not reclassify.
-        """
-        def _is_wildcard(value):
-            return value == '*' or value.endswith('__*')
-
-        items = select_clause if isinstance(select_clause, list) else [select_clause]
-        resolved = set()
-        for item in items:
-            if isinstance(item, str):
-                value = item
-            elif isinstance(item, dict) and isinstance(item.get('value'), str):
-                value = item['value']
-            else:
-                return None  # expression / aggregate / unsupported shape
-
-            if _is_wildcard(value):
-                if schema is None or table_name not in schema:
-                    return None
-                resolved.update(f'{table_name}__{col}' for col in schema[table_name].keys())
-                continue
-
-            if value.startswith(f'{alias}__'):
-                value = f'{table_name}{value[len(alias):]}'
-            elif '__' not in value:
-                value = f'{table_name}__{value}'
-            resolved.add(value)
-        return resolved
-
-    def _projection_guarantees_uniqueness(self, parsed, schema, constraints) -> bool:
-        """Detect "SET queries in disguise": a BAG query (no DISTINCT) whose
-        outermost SELECT projects columns that are already guaranteed
-        unique per row by a PRIMARY KEY or UNIQUE constraint on the single
-        source table.
-
-        Only PRIMARY and UNIQUE constraints guarantee uniqueness here.
-        FOREIGN KEY constraints merely reference another table's key and do
-        NOT guarantee uniqueness of this table's own rows, so the 'foreign'
-        constraint key is intentionally never consulted below.
-        """
-        if not constraints:
-            return False
-
-        table_info = self._get_single_base_table(parsed.get('from'))
-        if table_info is None:
-            return False
-        table_name, alias = table_info
-        if schema is not None and table_name not in schema:
-            return False
-
-        projected = self._resolve_projected_columns(
-            parsed.get('select'), table_name, alias, schema
-        )
-        if not projected:
-            return False
-
-        for constraint in constraints:
-            for key_type in ('primary', 'unique'):  # 'foreign' deliberately excluded
-                if key_type in constraint:
-                    key_cols = self._flatten_constraint_values(constraint[key_type])
-                    if key_cols and key_cols.issubset(projected):
-                        return True
-        return False
-
-    def is_set_query(self, parsed, schema=None, constraints=None) -> bool:
-        """Strictly classify a parsed query's outermost SELECT as SET (True)
-        or BAG (False).
-
-        A query is a SET iff its outermost SELECT has a DISTINCT clause.
-        DISTINCT clauses on inner subqueries (FROM subqueries, CTE bodies,
-        etc.) are strictly ignored — only the top-level keys of `parsed`
-        are inspected, never recursed into.
-        mo_sql_parsing represents SELECT DISTINCT as the 'select_distinct' key.
-
-        If `schema`/`constraints` are supplied and the outermost SELECT has
-        no explicit DISTINCT, this also reclassifies "SET queries in
-        disguise": a query whose projection already includes a PRIMARY KEY
-        or UNIQUE column of its single source table is a SET in all but
-        name, since duplicate output rows are then impossible.
-        """
-        if 'select_distinct' in parsed:
-            return True
-        select_clause = parsed.get('select', {})
-        if isinstance(select_clause, dict) and 'distinct' in select_clause:
-            return True
-        if isinstance(select_clause, list):
-            for item in select_clause:
-                if isinstance(item, dict) and 'distinct' in item:
-                    return True
-        if schema is not None or constraints is not None:
-            return self._projection_guarantees_uniqueness(parsed, schema, constraints)
-        return False
-
-    def classify_set_or_bag(self, parsed, schema=None, constraints=None) -> str:
-        """Return QUERY_TYPE.SET or QUERY_TYPE.BAG for the outermost SELECT."""
-        return QUERY_TYPE.SET if self.is_set_query(parsed, schema, constraints) else QUERY_TYPE.BAG
-
-    def classify_queries(self, ast1, ast2, schema=None, constraints=None):
-        """Classify a Q1/Q2 pair as SET or BAG and store the result on the
-        parser instance (self.q1_type / self.q2_type)."""
-        self.q1_type = self.classify_set_or_bag(ast1, schema, constraints)
-        self.q2_type = self.classify_set_or_bag(ast2, schema, constraints)
-        return self.q1_type, self.q2_type
-
 #Amir: This is my additional method TODO: write documentation
-    def get_metadata_from_ast(self, parsed, schema=None, constraints=None):
-        # 1. Detect DISTINCT in outermost SELECT only (strict SET/BAG rule),
-        #    or a schema-derived "SET in disguise" via PK/UNIQUE projection.
-        is_distinct = self.is_set_query(parsed, schema, constraints)
+    def get_metadata_from_ast(self, parsed):
+        # 1. Detect DISTINCT in outermost SELECT.
+        #    mo_sql_parsing represents SELECT DISTINCT as 'select_distinct' key.
+        is_distinct = 'select_distinct' in parsed
+        if not is_distinct:
+            select_clause = parsed.get('select', {})
+            if isinstance(select_clause, dict) and 'distinct' in select_clause:
+                is_distinct = True
+            elif isinstance(select_clause, list):
+                for item in select_clause:
+                    if isinstance(item, dict) and 'distinct' in item:
+                        is_distinct = True
 
         # 2. Count atoms recursively through FROM subqueries;
         #    also detect DISTINCT in any immediate FROM subquery
@@ -549,7 +408,6 @@ class SQLParser:
 
         return {
             "is_distinct": is_distinct,
-            "query_type": QUERY_TYPE.SET if is_distinct else QUERY_TYPE.BAG,
             "atoms": atoms,
             "is_cq": is_cq,
             "bound_applicable": bound_applicable,
