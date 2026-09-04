@@ -83,11 +83,8 @@ class SemanticsAnalyzer:
             k.upper(): {c.upper(): t for c, t in v.items()}
             for k, v in (schema or {}).items()
         }
-        # Set during analyze_with_key_filter; used in _register to filter PK
-        # columns at the leaf level so the filter propagates through derived
-        # table and CTE aliases automatically.  None when not active.
-        self._single_pk_cols: dict[str, set] | None = None
-        # Kept for alias→table tracking (used by the post-processing loop).
+        # Populated during analyze_with_key_filter to track alias → table_name.
+        # None when not actively tracking.
         self._alias_to_table: dict[str, str] | None = None
 
     # ------------------------------------------------------------------
@@ -147,16 +144,22 @@ class SemanticsAnalyzer:
         dict[str, list[str]]
             Same format as analyze(), with single-PK columns removed.
         """
-        # Filter is applied at leaf registration (_register) so it propagates
-        # automatically through derived-table and CTE aliases.
-        self._single_pk_cols = _parse_single_pk_columns(constraints)
+        single_pk_cols = _parse_single_pk_columns(constraints)
+
+        # Enable alias→table tracking during traversal.
         self._alias_to_table = {}
         try:
             result = self.analyze(sql_or_ast)
         finally:
+            alias_map = self._alias_to_table
             self._alias_to_table = None
-            self._single_pk_cols = None
-        return result
+
+        filtered: dict[str, list[str]] = {}
+        for alias, cols in result.items():
+            table = alias_map.get(alias, alias)
+            pk_cols_to_remove = single_pk_cols.get(table, set())
+            filtered[alias] = [c for c in cols if c not in pk_cols_to_remove]
+        return filtered
 
     def count_bag_variables(self, sql_or_ast: str | dict) -> int:
         """Total BAG variable slots across all relations in the query."""
@@ -505,9 +508,6 @@ class SemanticsAnalyzer:
             return
 
         columns = list(self.schema.get(table_upper, {}).keys()) if context == self.BAG else []
-        if columns and self._single_pk_cols is not None:
-            pk_remove = self._single_pk_cols.get(table_upper, set())
-            columns = [c for c in columns if c not in pk_remove]
 
         # If the alias was already seen (e.g. self-join), merge column sets
         if alias_upper in result:
@@ -522,7 +522,6 @@ class SemanticsAnalyzer:
 
 _CQ_OUT_OF_SCOPE_RE = [re.compile(p) for p in [
     r"\bNOT\s+IN\b",
-    r"\bNOT\s+\w+\s+IN\s*\(",   # NOT <col> IN ( -- same semantics as NOT IN
     r"\bNOT\s+EXISTS\b",
     r"\bGROUP\s+BY\b",
     r"\bHAVING\b",
